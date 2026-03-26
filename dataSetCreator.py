@@ -6,117 +6,137 @@ from sklearn.model_selection import train_test_split
 
 DATASET_PATH = "model/Training"
 OUTPUT_DIR = "processed_dataset"
+MODEL_PATH = "hand_landmarker.task"
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def get_labels_and_paths(root_dir):
-    labels = []
+    raw_labels = []
     image_paths = []
+
     for label_name in sorted(os.listdir(root_dir)):
         label_path = os.path.join(root_dir, label_name)
         if not os.path.isdir(label_path):
             continue
-        # Only accept numeric labels (1, 2, ..., 10)
-        try:
-            label_int = int(label_name)
-        except ValueError:
+        if not label_name:
             continue
 
         for fname in os.listdir(label_path):
             if not fname.lower().endswith((".png", ".jpg", ".jpeg")):
                 continue
             image_paths.append(os.path.join(label_path, fname))
-            labels.append(label_int)
+            raw_labels.append(label_name)
 
-    return np.array(image_paths), np.array(labels)
+    return np.array(image_paths), np.array(raw_labels, dtype=object)
 
 
-def extract_hand_landmarks(image_bgr, hands):
-    # Convert BGR -> RGB for Mediapipe
+def create_hand_landmarker(model_path):
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"HandLandmarker model not found at: {model_path}."
+        )
+
+    BaseOptions = mp.tasks.BaseOptions
+    VisionRunningMode = mp.tasks.vision.RunningMode
+    HandLandmarker = mp.tasks.vision.HandLandmarker
+    HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=VisionRunningMode.IMAGE,
+        num_hands=2,
+    )
+
+    return HandLandmarker.create_from_options(options)
+
+
+def extract_hand_landmarks_with_tasks(image_bgr, landmarker):
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    results = hands.process(image_rgb)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+    detection_result = landmarker.detect(mp_image)
 
-    if not results.multi_hand_landmarks:
+    if not detection_result.hand_landmarks:
         return None
 
-    # Use the first detected hand
-    hand_landmarks = results.multi_hand_landmarks[0]
+    hand_landmarks = detection_result.hand_landmarks[0]
     coords = []
-    for lm in hand_landmarks.landmark:
+    for lm in hand_landmarks:
         coords.extend([lm.x, lm.y, lm.z])
 
-    # coords length = 21 landmarks * 3 coords = 63
     return np.array(coords, dtype=np.float32)
 
 
 def main():
     print(f"Loading images from: {DATASET_PATH}")
-    image_paths, labels = get_labels_and_paths(DATASET_PATH)
+    image_paths, raw_labels = get_labels_and_paths(DATASET_PATH)
     print(f"Found {len(image_paths)} images.")
 
     if len(image_paths) == 0:
         raise RuntimeError(
-            f"No images found under {DATASET_PATH}. "
-            f"Expected folders like model/Training/1-10/1, 2, ... with .png/.jpg files."
+            f"No images found under {DATASET_PATH}."
         )
 
-    mp_hands = mp.solutions.hands
+    print(f"Loading HandLandmarker model from: {MODEL_PATH}")
+    landmarker = create_hand_landmarker(MODEL_PATH)
 
     all_features = []
     all_labels = []
     no_hand_count = 0
 
-    # static_image_mode=True -> treat each image independently (no webcam)
-    with mp_hands.Hands(
-        static_image_mode=True,
-        max_num_hands=2,
-        min_detection_confidence=0.5
-    ) as hands:
-        for img_path, label in zip(image_paths, labels):
-            image = cv2.imread(img_path)
-            if image is None:
-                continue
+    for img_path, label_name in zip(image_paths, raw_labels):
+        image = cv2.imread(img_path)
+        if image is None:
+            print(f"Warning: could not read image {img_path}, skipping.")
+            continue
 
-            features = extract_hand_landmarks(image, hands)
-            if features is None:
-                # No hand detected; skip this sample
-                no_hand_count += 1
-                continue
+        features = extract_hand_landmarks_with_tasks(image, landmarker)
+        if features is None:
+            no_hand_count += 1
+            continue
 
-            all_features.append(features)
-            all_labels.append(label)
+        all_features.append(features)
+        all_labels.append(label_name)
+
+    landmarker.close()
 
     if not all_features:
         raise RuntimeError(
-            "No hands detected in any image. "
-            "Either your images don't clearly show hands, or Mediapipe Hands isn't working correctly."
+            "No hands detected in any image using HandLandmarker."
         )
 
     X = np.stack(all_features)
-    y = np.array(all_labels, dtype=np.int32)
+    raw_labels = np.array(all_labels, dtype=object)
 
-    print(f"Kept {X.shape[0]} samples after hand detection (skipped {no_hand_count}).")
-    print(f"Feature vector shape per sample: {X.shape[1]}")
+    unique_labels = np.unique(raw_labels)
+    unique_labels_sorted = np.sort(unique_labels)
 
-    # Normalize labels from 1–10 to 0–9 for one-hot training later
-    y_zero_based = y - 1
+    label_to_id = {label: idx for idx, label in enumerate(unique_labels_sorted)}
+    id_to_label = {idx: label for label, idx in label_to_id.items()}
 
-    num_classes = len(np.unique(y_zero_based))
-    n_samples = len(y_zero_based)
+    y_encoded = np.array([label_to_id[label] for label in raw_labels], dtype=np.int32)
+
+    num_classes = len(unique_labels_sorted)
+    n_samples = len(y_encoded)
+
+    print("Label mapping (string -> id):", label_to_id)
     print(f"Total samples: {n_samples}, classes: {num_classes}")
 
-    # DEBUG: show how many samples you have per class
-    unique, counts = np.unique(y_zero_based, return_counts=True)
-    print("Counts per class (0–9):", dict(zip(unique, counts)))
+    unique_ids, counts = np.unique(y_encoded, return_counts=True)
+    print("Counts per class (id):", dict(zip(unique_ids, counts)))
 
-    # Random train/test split WITHOUT stratify, because with 2 images per class
-    # a stratified 80/20 split is mathematically impossible (test set too small).
+    # SAVE MAPPING AS ARRAY TO AVOID TYPE ERROR
+    mapping_array = np.array(
+        [[idx, label] for idx, label in id_to_label.items()],
+        dtype=object,
+    )
+    np.save(os.path.join(OUTPUT_DIR, "id_to_label.npy"), mapping_array)
+
     X_train, X_test, y_train, y_test = train_test_split(
         X,
-        y_zero_based,
+        y_encoded,
         test_size=0.2,
-        random_state=42
-        # no stratify here
+        random_state=42,
     )
 
     np.save(os.path.join(OUTPUT_DIR, "X_train.npy"), X_train)
@@ -126,6 +146,7 @@ def main():
 
     print(f"Saved dataset to {OUTPUT_DIR}")
     print("Train:", X_train.shape, "Test:", X_test.shape)
+    print(f"Skipped {no_hand_count} images with no detected hands.")
 
 
 if __name__ == "__main__":
