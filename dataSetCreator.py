@@ -33,9 +33,7 @@ def get_labels_and_paths(root_dir):
 
 def create_hand_landmarker(model_path):
     if not os.path.exists(model_path):
-        raise FileNotFoundError(
-            f"HandLandmarker model not found at: {model_path}."
-        )
+        raise FileNotFoundError(f"HandLandmarker model not found at: {model_path}.")
 
     BaseOptions = mp.tasks.BaseOptions
     VisionRunningMode = mp.tasks.vision.RunningMode
@@ -73,9 +71,7 @@ def main():
     print(f"Found {len(image_paths)} images.")
 
     if len(image_paths) == 0:
-        raise RuntimeError(
-            f"No images found under {DATASET_PATH}."
-        )
+        raise RuntimeError(f"No images found under {DATASET_PATH}.")
 
     print(f"Loading HandLandmarker model from: {MODEL_PATH}")
     landmarker = create_hand_landmarker(MODEL_PATH)
@@ -101,9 +97,7 @@ def main():
     landmarker.close()
 
     if not all_features:
-        raise RuntimeError(
-            "No hands detected in any image using HandLandmarker."
-        )
+        raise RuntimeError("No hands detected in any image using HandLandmarker.")
 
     X = np.stack(all_features)
     raw_labels = np.array(all_labels, dtype=object)
@@ -125,7 +119,7 @@ def main():
     unique_ids, counts = np.unique(y_encoded, return_counts=True)
     print("Counts per class (id):", dict(zip(unique_ids, counts)))
 
-    # SAVE MAPPING AS ARRAY TO AVOID TYPE ERROR
+    # save mapping as an array so Pylance is happy
     mapping_array = np.array(
         [[idx, label] for idx, label in id_to_label.items()],
         dtype=object,
